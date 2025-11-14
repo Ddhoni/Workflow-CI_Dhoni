@@ -1,105 +1,127 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
+name: CI Workflow
 
-import os
-import json
-from pathlib import Path
-from typing import Optional, Dict
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
 
-from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
-from googleapiclient.errors import HttpError
+permissions:
+  contents: write
 
-MLRUNS_ROOT = os.environ.get("MLRUNS_ROOT", "Workflow-CI/MLProject/mlruns")
-DEST_PARENT_ID = os.environ["GDRIVE_FOLDER_ID"]  # folder/drive tujuan
-creds_json = json.loads(os.environ["GDRIVE_CREDENTIALS"])
-credentials = Credentials.from_service_account_info(
-    creds_json, scopes=["https://www.googleapis.com/auth/drive"]
-)
-service = build("drive", "v3", credentials=credentials, cache_discovery=False)
+jobs:
+  build:
+    runs-on: ubuntu-latest
 
-def find_child_by_name(parent_id: str, name: str) -> Optional[Dict]:
-    """Cari item bernama 'name' di dalam parent_id (Shared Drive aware)."""
-    q = "name = %(name)r and '%(parent)s' in parents and trashed = false" % {
-        "name": name, "parent": parent_id
-    }
-    resp = service.files().list(
-        q=q,
-        spaces="drive",
-        fields="files(id, name, mimeType)",
-        supportsAllDrives=True,
-        includeItemsFromAllDrives=True
-    ).execute()
-    files = resp.get("files", [])
-    return files[0] if files else None
+    env:
+      MLFLOW_TRACKING_URI: file:${{ github.workspace }}/mlruns
+      MLFLOW_EXPERIMENT_NAME: CI-Workflow
 
-def ensure_folder(parent_id: str, name: str) -> str:
-    """Pastikan folder dengan nama 'name' ada di parent_id. Return folder_id."""
-    existing = find_child_by_name(parent_id, name)
-    if existing and existing.get("mimeType") == "application/vnd.google-apps.folder":
-        return existing["id"]
-    meta = {
-        "name": name,
-        "mimeType": "application/vnd.google-apps.folder",
-        "parents": [parent_id],
-    }
-    created = service.files().create(
-        body=meta, fields="id", supportsAllDrives=True
-    ).execute()
-    return created["id"]
+    steps:
+      # 1. Checkout repository
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          lfs: true
 
-def upload_file(local_path: Path, parent_id: str):
-    media = MediaFileUpload(local_path.as_posix(), resumable=True)
-    body = {"name": local_path.name, "parents": [parent_id]}
-    service.files().create(
-        body=body,
-        media_body=media,
-        fields="id",
-        supportsAllDrives=True
-    ).execute()
+      # 2. Setup Git LFS
+      - name: Setup Git LFS
+        run: |
+          git lfs install
 
-def upload_directory(local_dir: Path, parent_id: str):
-    for item in sorted(local_dir.iterdir()):
-        if item.name.startswith("."):
-            continue
-        if item.is_dir():
-            folder_id = ensure_folder(parent_id, item.name)
-            upload_directory(item, folder_id)
-        else:
-            print(f"Uploading file: {item}")
-            upload_file(item, parent_id)
+      # 3. Setup Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.7"
 
-def main():
-    mlruns_path = Path(MLRUNS_ROOT)
-    if not mlruns_path.exists():
-        raise SystemExit(f"Path not found: {mlruns_path}")
+      # 4. Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install \
+            "mlflow==2.19.0" \
+            "catboost==1.2.5" \
+            "scikit-learn==1.5.2" \
+            "pandas==2.2.3" \
+            "numpy==1.26.4" \
+            "matplotlib==3.9.2" \
+            "scipy==1.11.4"
 
-    # Struktur: mlruns/<experiment_id>/<run_id>/
-    exp_dirs = [p for p in mlruns_path.iterdir() if p.is_dir() and not p.name.startswith(".")]
+      # 5. Jalankan MLflow project (output → mlruns/ di root repo)
+      - name: Run MLflow Project
+        env:
+          MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
+        working-directory: MLProject
+        run: |
+          echo "MLFLOW_TRACKING_URI=$MLFLOW_TRACKING_URI"
+          mlflow run . --env-manager=local --experiment-name "${MLFLOW_EXPERIMENT_NAME}"
 
-    if not exp_dirs:
-        print("No experiments found under mlruns/. Nothing to upload.")
-        return
+      # 6. Ambil RUN_ID dengan model terbaru
+      - name: Get latest run ID
+        run: |
+          MODEL_PATH=$(find mlruns -type f -path "*/artifacts/model/MLmodel" -printf '%T@ %p\n' \
+                        | sort -nr | head -n1 | awk '{print $2}')
 
-    for exp_dir in exp_dirs:
-        run_dirs = [p for p in exp_dir.iterdir() if p.is_dir()]
-        print(f"[INFO] Experiment {exp_dir.name}: {len(run_dirs)} run(s)")
+          if [ -z "$MODEL_PATH" ]; then
+            echo "RUN_ID=" >> $GITHUB_ENV
+            echo "DOCKER_BUILT=false" >> $GITHUB_ENV
+            exit 0
+          fi
 
-        # Buat folder experiment di Drive (opsional, biar rapi)
-        exp_drive_id = ensure_folder(DEST_PARENT_ID, exp_dir.name)
+          RUN_DIR=$(dirname "$(dirname "$(dirname "$MODEL_PATH")")")
+          RUN_ID=$(basename "$RUN_DIR")
 
-        for run_dir in run_dirs:
-            # Buat folder run_id di bawah experiment
-            run_drive_id = ensure_folder(exp_drive_id, run_dir.name)
-            print(f"=== Uploading run: {exp_dir.name}/{run_dir.name} ===")
-            upload_directory(run_dir, run_drive_id)
+          echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
+          echo "DOCKER_BUILT=false" >> $GITHUB_ENV
 
-    print("=== All experiments/runs uploaded to Google Drive ===")
+      # 7. Commit MLflow artifacts using Git LFS
+      - name: Commit MLflow Artifacts with Git LFS
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-if __name__ == "__main__":
-    try:
-        main()
-    except HttpError as e:
-        print(f"[DriveAPI] HttpError: {e}")
-        raise
+          git lfs track "mlruns/**"
+          git add .gitattributes
+          git add mlruns || true
+
+          git commit -m "Add MLflow artifacts [skip ci]" || echo "No changes"
+          git push origin main || echo "Nothing to push"
+
+      # 8. Build Docker Image
+      - name: Build Docker image
+        if: env.RUN_ID != ''
+        run: |
+          if [ -f "mlruns/*/${RUN_ID}/artifacts/model/MLmodel" ]; then
+            mlflow models build-docker \
+              --model-uri "runs:/${RUN_ID}/model" \
+              --name creditscore_model
+
+            echo "DOCKER_BUILT=true" >> $GITHUB_ENV
+          else
+            echo "Model not found. Skipping docker build."
+            echo "DOCKER_BUILT=false" >> $GITHUB_ENV
+          fi
+
+      # 9. Login Docker Hub
+      - name: Log in to Docker Hub
+        if: env.DOCKER_BUILT == 'true'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKER_HUB_USERNAME }}
+          password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
+
+      # 10. Tag Docker image
+      - name: Tag Docker image
+        if: env.DOCKER_BUILT == 'true'
+        run: |
+          docker tag creditscore_model ${{ secrets.DOCKER_HUB_USERNAME }}/creditscore_model:latest
+
+      # 11. Push Docker image
+      - name: Push Docker image
+        if: env.DOCKER_BUILT == 'true'
+        run: |
+          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/creditscore_model:latest
+
+      # 12. Done
+      - name: Finished
+        run: echo "✅ CI workflow done."
