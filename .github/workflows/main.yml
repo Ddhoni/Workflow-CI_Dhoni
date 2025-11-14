@@ -52,17 +52,30 @@ jobs:
           mkdir -p mlruns
           mlflow run . --env-manager=local --experiment-name "${MLFLOW_EXPERIMENT_NAME}"
 
-      # 5. Ambil RUN_ID terbaru dari mlruns
-      - name: Get latest MLflow run_id
+      # 5. Ambil RUN_ID dari MLmodel terbaru (bukan sekadar latest run)
+      - name: Get latest MLflow run_id (with model)
         working-directory: MLProject
         run: |
-          RUN_DIR=$(find mlruns -mindepth 2 -maxdepth 2 -type d -printf '%T@ %p\n' \
-                    | sort -nr | head -n1 | awk '{print $2}')
-          RUN_ID=$(basename "$RUN_DIR")
-          echo "RUN_ID=$RUN_ID"
-          echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
+          # Cari file MLmodel terbaru di bawah mlruns/*/*/artifacts/model/MLmodel
+          MODEL_PATH=$(find mlruns -type f -path "*/artifacts/model/MLmodel" -printf '%T@ %p\n' \
+                       | sort -nr | head -n1 | awk '{print $2}')
 
-      # 6. Commit & push artefak MLflow (untuk bukti CI)
+          if [ -z "$MODEL_PATH" ]; then
+            echo "No MLmodel artifact found in mlruns; cannot build docker."
+            echo "RUN_ID=" >> $GITHUB_ENV
+            echo "DOCKER_BUILT=false" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          # MODEL_PATH = mlruns/<exp_id>/<run_id>/artifacts/model/MLmodel
+          RUN_DIR=$(dirname "$(dirname "$MODEL_PATH")")   # .. = artifacts, .. = run_id
+          RUN_ID=$(basename "$RUN_DIR")
+
+          echo "Using RUN_ID=$RUN_ID from MLmodel at $MODEL_PATH"
+          echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
+          echo "DOCKER_BUILT=false" >> $GITHUB_ENV
+
+      # 6. Commit & push artefak MLflow
       - name: Commit & Push MLflow artifacts
         run: |
           git config --global user.name "github-actions[bot]"
