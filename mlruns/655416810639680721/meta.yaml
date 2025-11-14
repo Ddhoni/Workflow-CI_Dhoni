@@ -1,6 +1,3 @@
-artifact_location: file:///Users/muhammaddhoniapriyadi/Downloads/eksperimen_credit_scoring/Workflow-CI/mlruns/655416810639680721
-creation_time: 1762632625321
-experiment_id: '655416810639680721'
-last_update_time: 1762632625321
-lifecycle_stage: active
-name: Credit_Scoring_Classification
+version https://git-lfs.github.com/spec/v1
+oid sha256:84c5ae89a2c8007cc66ab4a8238facd13d4c734adc0add66a01a73ddc7a186cf
+size 286

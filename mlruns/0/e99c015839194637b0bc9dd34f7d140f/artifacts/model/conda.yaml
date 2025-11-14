@@ -1,14 +1,3 @@
-channels:
-- conda-forge
-dependencies:
-- python=3.12.7
-- pip<=25.3
-- pip:
-  - mlflow==2.19.0
-  - catboost==1.2.8
-  - colorama==0.4.6
-  - ipython==9.7.0
-  - numpy==2.1.3
-  - pandas==2.3.3
-  - scipy==1.16.3
-name: mlflow-env
+version https://git-lfs.github.com/spec/v1
+oid sha256:db6285312c3837051e52fb938fc19ce1e7f596a1a38aa6b99ebf622ac0d286ea
+size 221
