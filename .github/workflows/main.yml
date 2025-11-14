@@ -67,15 +67,18 @@ jobs:
             exit 0
           fi
 
+          echo "Found MLmodel at: $MODEL_PATH"
+
           # MODEL_PATH = mlruns/<exp_id>/<run_id>/artifacts/model/MLmodel
-          RUN_DIR=$(dirname "$(dirname "$MODEL_PATH")")   # .. = artifacts, .. = run_id
+          # Naik 3 level: MLmodel -> model -> artifacts -> <run_id>
+          RUN_DIR=$(dirname "$(dirname "$(dirname "$MODEL_PATH")")")
           RUN_ID=$(basename "$RUN_DIR")
 
-          echo "Using RUN_ID=$RUN_ID from MLmodel at $MODEL_PATH"
+          echo "Using RUN_ID=$RUN_ID from RUN_DIR=$RUN_DIR"
           echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
           echo "DOCKER_BUILT=false" >> $GITHUB_ENV
 
-      # 6. Commit & push artefak MLflow (opsional, buat bukti CI)
+      # 6. Commit & push artefak MLflow (opsional, untuk bukti CI)
       - name: Commit & Push MLflow artifacts
         run: |
           git config --global user.name "github-actions[bot]"
@@ -107,6 +110,7 @@ jobs:
         env:
           MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
         run: |
+          echo "Checking model for RUN_ID=${RUN_ID}..."
           if ls mlruns/*/${RUN_ID}/artifacts/model/MLmodel >/dev/null 2>&1; then
             echo "Model artifact found for RUN_ID=${RUN_ID}, building Docker image..."
             mlflow models build-docker \
