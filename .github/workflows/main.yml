@@ -75,7 +75,7 @@ jobs:
           echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
           echo "DOCKER_BUILT=false" >> $GITHUB_ENV
 
-      # 6. Commit & push artefak MLflow
+      # 6. Commit & push artefak MLflow (opsional, buat bukti CI)
       - name: Commit & Push MLflow artifacts
         run: |
           git config --global user.name "github-actions[bot]"
@@ -118,15 +118,15 @@ jobs:
             echo "DOCKER_BUILT=false" >> $GITHUB_ENV
           fi
 
-      # 9. Login ke Docker Hub (hanya kalau image berhasil dibuild)
+      # 9. Login ke Docker Hub (sepanjang RUN_ID ada)
       - name: Log in to Docker Hub
-        if: env.DOCKER_BUILT == 'true'
+        if: env.RUN_ID != ''
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
 
-      # 10. Tag Docker image
+      # 10. Tag Docker image (hanya kalau image berhasil dibuild)
       - name: Tag Docker image
         if: env.DOCKER_BUILT == 'true'
         run: |
@@ -136,7 +136,7 @@ jobs:
             echo "creditscore_model image not found; skipping tag."
           fi
 
-      # 11. Push Docker image
+      # 11. Push Docker image (hanya kalau image berhasil dibuild)
       - name: Push Docker image
         if: env.DOCKER_BUILT == 'true'
         run: |
