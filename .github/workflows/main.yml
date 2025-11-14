@@ -12,23 +12,39 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
+      # Semua artefak MLflow disimpan di MLProject/mlruns
       MLFLOW_TRACKING_URI: file:${{ github.workspace }}/MLProject/mlruns
       MLFLOW_EXPERIMENT_NAME: CI-Workflow
 
     steps:
+      # 1) Checkout kode
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2) Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12.7"
 
-      - name: Install MLflow (runner only)
+      # 3) Install dependency untuk training + upload GDrive
+      - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install "mlflow==2.19.0"
+          pip install \
+            "mlflow==2.19.0" \
+            "catboost==1.2.5" \
+            "scikit-learn==1.5.2" \
+            "pandas==2.2.3" \
+            "numpy==1.26.4" \
+            "matplotlib==3.9.2" \
+            "scipy==1.11.4" \
+            google-api-python-client \
+            google-auth \
+            google-auth-httplib2 \
+            google-auth-oauthlib
 
+      # 4) Jalankan MLflow Project di folder MLProject
       - name: Run MLflow Project
         working-directory: MLProject
         env:
@@ -37,31 +53,26 @@ jobs:
           mkdir -p mlruns
           mlflow run . --env-manager=local --experiment-name "${MLFLOW_EXPERIMENT_NAME}"
 
+      # 5) Ambil RUN_ID terbaru dari MLflow
       - name: Get latest MLflow run_id
         working-directory: MLProject
         run: |
           RUN_DIR=$(find mlruns -mindepth 2 -maxdepth 2 -type d -printf '%T@ %p\n' \
                     | sort -nr | head -n1 | awk '{print $2}')
           RUN_ID=$(basename "$RUN_DIR")
+          echo "RUN_ID=$RUN_ID"
           echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
-          echo "Latest run_id: $RUN_ID"
 
-      - name: Commit & Push MLflow Artifacts
+      # 6) Commit & push artefak MLflow (opsional, buat bukti CI)
+      - name: Commit & Push MLflow artifacts
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add MLProject/mlruns/
+          git add MLProject/mlruns/ || echo "No mlruns directory to add"
           git commit -m "Upload MLflow artifacts [skip ci]" || echo "No changes to commit"
-          git push origin main
+          git push origin main || echo "No changes to push"
 
-      # -----------------------------------------------------------
-      # 🔥 UPLOAD KE GDRIVE — ini dikembalikan lagi ke workflow
-      # -----------------------------------------------------------
-
-      - name: Install Upload Dependencies
-        run: |
-          pip install google-api-python-client google-auth google-auth-httplib2 google-auth-oauthlib || true
-
+      # 7) Upload artefak ke Google Drive (pakai upload_to_gdrive.py kalau ada)
       - name: Upload to Google Drive
         if: env.RUN_ID != ''
         working-directory: ${{ github.workspace }}
@@ -77,10 +88,7 @@ jobs:
             echo "No upload_to_gdrive.py script found; skipping."
           fi
 
-      # -----------------------------------------------------------
-      # Setelah upload → baru build Docker
-      # -----------------------------------------------------------
-
+      # 8) Build docker image dari model MLflow
       - name: Build Docker Model
         if: env.RUN_ID != ''
         working-directory: MLProject
@@ -92,10 +100,11 @@ jobs:
               --model-uri "runs:/${RUN_ID}/model" \
               --name creditscore_model
           else
-            echo "No model found for RUN_ID=${RUN_ID}; skipping docker build."
+            echo "No model artifact found for RUN_ID=${RUN_ID}; skipping docker build."
             exit 0
           fi
 
+      # 9) Login ke Docker Hub
       - name: Log in to Docker Hub
         if: env.RUN_ID != ''
         uses: docker/login-action@v3
@@ -103,15 +112,18 @@ jobs:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
 
-      - name: Tag Docker Image
+      # 10) Tag image
+      - name: Tag Docker image
         if: env.RUN_ID != ''
         run: |
           docker tag creditscore_model ${{ secrets.DOCKER_HUB_USERNAME }}/creditscore_model:latest
 
-      - name: Push Docker Image
+      # 11) Push image ke Docker Hub
+      - name: Push Docker image
         if: env.RUN_ID != ''
         run: |
           docker push ${{ secrets.DOCKER_HUB_USERNAME }}/creditscore_model:latest
 
+      # 12) Selesai
       - name: Done
         run: echo "✅ CI workflow complete."
