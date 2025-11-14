@@ -3,6 +3,7 @@ name: CI Workflow
 on:
   push:
     branches: ["main"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -12,21 +13,28 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      MLFLOW_TRACKING_URI: file:${{ github.workspace }}/MLProject/mlruns
+      MLFLOW_TRACKING_URI: file:${{ github.workspace }}/mlruns
       MLFLOW_EXPERIMENT_NAME: CI-Workflow
 
     steps:
-      # 1. Checkout repo
+      # 1. Checkout repository
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          lfs: true
 
-      # 2. Setup Python
+      # 2. Setup Git LFS
+      - name: Setup Git LFS
+        run: |
+          git lfs install
+
+      # 3. Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12.7"
 
-      # 3. Install dependencies (training + GDrive)
+      # 4. Install dependencies
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -37,119 +45,83 @@ jobs:
             "pandas==2.2.3" \
             "numpy==1.26.4" \
             "matplotlib==3.9.2" \
-            "scipy==1.11.4" \
-            google-api-python-client \
-            google-auth \
-            google-auth-httplib2 \
-            google-auth-oauthlib
+            "scipy==1.11.4"
 
-      # 4. Jalankan MLflow Project di folder MLProject
+      # 5. Jalankan MLflow project (output → mlruns/ di root repo)
       - name: Run MLflow Project
-        working-directory: MLProject
         env:
           MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
-        run: |
-          mkdir -p mlruns
-          mlflow run . --env-manager=local --experiment-name "${MLFLOW_EXPERIMENT_NAME}"
-
-      # 5. Ambil RUN_ID dari MLmodel terbaru (bukan sekadar latest run)
-      - name: Get latest MLflow run_id (with model)
         working-directory: MLProject
         run: |
-          # Cari file MLmodel terbaru di bawah mlruns/*/*/artifacts/model/MLmodel
+          echo "MLFLOW_TRACKING_URI=$MLFLOW_TRACKING_URI"
+          mlflow run . --env-manager=local --experiment-name "${MLFLOW_EXPERIMENT_NAME}"
+
+      # 6. Ambil RUN_ID dengan model terbaru
+      - name: Get latest run ID
+        run: |
           MODEL_PATH=$(find mlruns -type f -path "*/artifacts/model/MLmodel" -printf '%T@ %p\n' \
-                       | sort -nr | head -n1 | awk '{print $2}')
+                        | sort -nr | head -n1 | awk '{print $2}')
 
           if [ -z "$MODEL_PATH" ]; then
-            echo "No MLmodel artifact found in mlruns; cannot build docker."
             echo "RUN_ID=" >> $GITHUB_ENV
             echo "DOCKER_BUILT=false" >> $GITHUB_ENV
             exit 0
           fi
 
-          echo "Found MLmodel at: $MODEL_PATH"
-
-          # MODEL_PATH = mlruns/<exp_id>/<run_id>/artifacts/model/MLmodel
-          # Naik 3 level: MLmodel -> model -> artifacts -> <run_id>
           RUN_DIR=$(dirname "$(dirname "$(dirname "$MODEL_PATH")")")
           RUN_ID=$(basename "$RUN_DIR")
 
-          echo "Using RUN_ID=$RUN_ID from RUN_DIR=$RUN_DIR"
           echo "RUN_ID=$RUN_ID" >> $GITHUB_ENV
           echo "DOCKER_BUILT=false" >> $GITHUB_ENV
 
-      # 6. Commit & push artefak MLflow (opsional, untuk bukti CI)
-      - name: Commit & Push MLflow artifacts
+      # 7. Commit MLflow artifacts using Git LFS
+      - name: Commit MLflow Artifacts with Git LFS
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add MLProject/mlruns/ || echo "No mlruns directory to add"
-          git commit -m "Upload MLflow artifacts [skip ci]" || echo "No changes to commit"
-          git push origin main || echo "No changes to push"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      # 7. Upload artefak ke Google Drive (jika script tersedia)
-      - name: Upload to Google Drive
-        if: env.RUN_ID != ''
-        working-directory: ${{ github.workspace }}
-        env:
-          GDRIVE_CREDENTIALS: ${{ secrets.GDRIVE_CREDENTIALS }}
-          GDRIVE_FOLDER_ID: ${{ secrets.GDRIVE_FOLDER_ID }}
-          MLRUNS_ROOT: MLProject/mlruns
-          RUN_ID: ${{ env.RUN_ID }}
-        run: |
-          if [ -f "MLProject/upload_to_gdrive.py" ]; then
-            python MLProject/upload_to_gdrive.py || true
-          else
-            echo "No upload_to_gdrive.py script found; skipping."
-          fi
+          git lfs track "mlruns/**"
+          git add .gitattributes
+          git add mlruns || true
 
-      # 8. Build Docker image dari model MLflow
-      - name: Build Docker Model
+          git commit -m "Add MLflow artifacts [skip ci]" || echo "No changes"
+          git push origin main || echo "Nothing to push"
+
+      # 8. Build Docker Image
+      - name: Build Docker image
         if: env.RUN_ID != ''
-        working-directory: MLProject
-        env:
-          MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
         run: |
-          echo "Checking model for RUN_ID=${RUN_ID}..."
-          if ls mlruns/*/${RUN_ID}/artifacts/model/MLmodel >/dev/null 2>&1; then
-            echo "Model artifact found for RUN_ID=${RUN_ID}, building Docker image..."
+          if [ -f "mlruns/*/${RUN_ID}/artifacts/model/MLmodel" ]; then
             mlflow models build-docker \
               --model-uri "runs:/${RUN_ID}/model" \
               --name creditscore_model
+
             echo "DOCKER_BUILT=true" >> $GITHUB_ENV
           else
-            echo "No model artifact found for RUN_ID=${RUN_ID}; skipping docker build."
+            echo "Model not found. Skipping docker build."
             echo "DOCKER_BUILT=false" >> $GITHUB_ENV
           fi
 
-      # 9. Login ke Docker Hub (sepanjang RUN_ID ada)
+      # 9. Login Docker Hub
       - name: Log in to Docker Hub
-        if: env.RUN_ID != ''
+        if: env.DOCKER_BUILT == 'true'
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKER_HUB_USERNAME }}
           password: ${{ secrets.DOCKER_HUB_ACCESS_TOKEN }}
 
-      # 10. Tag Docker image (hanya kalau image berhasil dibuild)
+      # 10. Tag Docker image
       - name: Tag Docker image
         if: env.DOCKER_BUILT == 'true'
         run: |
-          if docker images | grep -q "creditscore_model"; then
-            docker tag creditscore_model ${{ secrets.DOCKER_HUB_USERNAME }}/creditscore_model:latest
-          else
-            echo "creditscore_model image not found; skipping tag."
-          fi
+          docker tag creditscore_model ${{ secrets.DOCKER_HUB_USERNAME }}/creditscore_model:latest
 
-      # 11. Push Docker image (hanya kalau image berhasil dibuild)
+      # 11. Push Docker image
       - name: Push Docker image
         if: env.DOCKER_BUILT == 'true'
         run: |
-          if docker images | grep -q "creditscore_model"; then
-            docker push ${{ secrets.DOCKER_HUB_USERNAME }}/creditscore_model:latest
-          else
-            echo "creditscore_model image not found; skipping push."
-          fi
+          docker push ${{ secrets.DOCKER_HUB_USERNAME }}/creditscore_model:latest
 
-      # 12. Selesai
-      - name: Done
-        run: echo "✅ CI workflow complete."
+      # 12. Done
+      - name: Finished
+        run: echo "✅ CI workflow done."
